@@ -1,0 +1,177 @@
+ /*
+This creates both the DCR and DCE's needed to ingest data into Sentinel from Zscaler's Cloud NSS capability.
+Please replace any references to workspace names or resource groups with your deployment details.
+Steps needed to deploy:
+1. Create an App Registration as per the Deployment Guide or Storylane demo
+2. Run this script from Azure CLI using the following command:
+
+    az stack group create --name cloud-nss-zidauth --resource-group <resource group containing your log analytics workspace> --template-file ./cloud-nss-zidauth.bicep --deny-settings-mode 'none' --action-on-unmanage deleteResources
+
+  You will be prompted for parameters such as the resource group name and workspace id. You can enter ? and press enter to get a description of where to find each item.
+
+  Alternatively, you can specify these parameters ahead of time by populating the cloud-nss-zidauth.bicepparams file and running the following command in Azure CLI to deploy:
+
+    az stack group create --name cloud-nss-zidauth --resource-group <resource group containing your log analytics workspace> --parameters cloud-nss-zidauth.bicepparam --deny-settings-mode 'none' --action-on-unmanage deleteResources
+
+3. Go to the DCR this bicep template creates -> IAM -> Add this DCR as a Monitoring Metrics Publisher for the App Registration you created earlier.
+4. Configure your Cloud NSS feed in the Zscaler Portal, selecting Authentication as the Log Type. You can retrieve the feed API URL using the following command in Azure CLI:
+
+    az stack group show -g <resource group containing your log analytics workspace> -n cloud-nss-zidauth --query outputs.api_url
+
+5. If you ever need to delete the deployment, you can run the following command from Azure CLI:
+
+    az stack group delete --name cloud-nss-zidauth --resource-group <resource group containing your log analytics workspace> --delete-resources
+
+*/
+// These resources need to be pre-configured
+@description('Found under Log Analytics workspace -> your workspace -> Overview -> Resource group')
+param resourceGroup string // Found under Log Analytics workspace -> your workspace -> Overview -> Resource group
+@description('The name of your Log Analytics workspace')
+param workspaceName string
+@description('Found under Log Analytics workspace -> your workspace -> Overview -> JSON View -> location. I.e. australiaeast')
+param location string
+@description('Found under Log Analytics workspace -> your workspace -> Overview -> Subscription ID')
+param subscriptionId string
+@description('Found under Log Analytics workspace -> your workspace -> Overview -> Workspace ID')
+param workspaceId string
+
+// These resources are configured through bicep
+@description('Name of Data Collection Endpoint the template will create')
+param dceName string
+@description('Name of the Data Collection Rule the template will create')
+param dcrName string
+
+resource dce 'Microsoft.Insights/dataCollectionEndpoints@2022-06-01' = {
+  properties: {
+    configurationAccess: {}
+    logsIngestion: {}
+    networkAcls: {
+      publicNetworkAccess: 'Enabled'
+    }
+  }
+  location: location
+  name: dceName
+}
+
+resource dcr 'Microsoft.Insights/dataCollectionRules@2022-06-01' = {
+  properties: {
+    dataCollectionEndpointId: dce.id
+    streamDeclarations: {
+      'Custom-nss_zidauth_CL': {
+        columns: [
+          {
+            name: 'TimeGenerated'
+            type: 'datetime'
+          }
+          {
+            name: 'sourcetype'
+            type: 'string'
+          }
+          {
+            name: 'vendor'
+            type: 'string'
+          }
+          {
+            name: 'product'
+            type: 'string'
+          }
+          {
+            name: 'version'
+            type: 'string'
+          }
+          {
+            name: 'Severity'
+            type: 'string'
+          }
+          {
+            name: 'name'
+            type: 'string'
+          }
+          {
+            name: 'deviceEventClassId'
+            type: 'string'
+          }
+          {
+            name: 'act'
+            type: 'string'
+          }
+          {
+            name: 'cs1Label'
+            type: 'string'
+          }
+          {
+            name: 'cs1'
+            type: 'string'
+          }
+          {
+            name: 'cs2Label'
+            type: 'string'
+          }
+          {
+            name: 'cs2'
+            type: 'string'
+          }
+          {
+            name: 'cs3Label'
+            type: 'string'
+          }
+          {
+            name: 'cs3'
+            type: 'string'
+          }
+          {
+            name: 'cat'
+            type: 'string'
+          }
+          {
+            name: 'suser'
+            type: 'string'
+          }
+          {
+            name: 'src'
+            type: 'string'
+          }
+          {
+            name: 'outcome'
+            type: 'string'
+          }
+          // recordid is a 19-digit value (e.g. 6917529027641081906). It must stay a string:
+          // typing it numerically truncates it or fails ingestion.
+          {
+            name: 'deviceExternalId'
+            type: 'string'
+          }
+        ]
+      }
+    }
+    dataSources: {}
+    destinations: {
+      logAnalytics: [
+        {
+          workspaceResourceId: resourceId(subscriptionId, resourceGroup, 'microsoft.operationalinsights/workspaces', workspaceName)
+          name: workspaceId
+        }
+      ]
+    }
+    dataFlows: [
+      {
+        streams: [
+          'Custom-nss_zidauth_CL'
+        ]
+        destinations: [
+          workspaceId
+        ]
+        // sourcetype is declared in the stream above but deliberately not projected here,
+        // matching cloud-nss-audit.bicep. CommonSecurityLog has no column for it.
+        transformKql: 'source | project TimeGenerated, DeviceVendor=tostring(vendor), DeviceProduct=tostring(product), DeviceVersion=tostring(version), LogSeverity=tostring(Severity), Activity=tostring(name), DeviceEventClassID=tostring(deviceEventClassId), DeviceAction=tostring(act), DeviceCustomString1Label=tostring(cs1Label), DeviceCustomString1=tostring(cs1), DeviceCustomString2Label=tostring(cs2Label), DeviceCustomString2=tostring(cs2), DeviceCustomString3Label=tostring(cs3Label), DeviceCustomString3=tostring(cs3), DeviceEventCategory=tostring(cat), SourceUserName=tostring(suser), SourceIP=tostring(src), EventOutcome=tostring(outcome), deviceExternalId=tostring(deviceExternalId)'
+
+        outputStream: 'Microsoft-CommonSecurityLog'
+      }
+    ]
+  }
+  location: location
+  name: dcrName
+}
+
+// Store feed api url in template output
+output api_url string = '${dce.properties.logsIngestion.endpoint}/dataCollectionRules/${dcr.properties.immutableId}/streams/Custom-nss_zidauth_CL?api-version=2021-11-01-preview'
