@@ -43,9 +43,11 @@ Capture `appId`, `password`, and `tenant`. Treat the password as a secret.
 
 ## Step 2 — Deploy the bicep
 
-Fill in `cloud-nss-zidauth.bicepparam`, then:
+Fill in `cloud-nss-zidauth.bicepparam`, then run from **this directory** — `--parameters` takes a relative path:
 
 ```bash
+cd microsoft-sentinel/zia-log-feeds/zidauth
+
 az stack group create \
   --name cloud-nss-zidauth \
   --resource-group <your-rg> \
@@ -58,7 +60,7 @@ az stack group create \
 Retrieve the ingest URL Zscaler needs:
 
 ```bash
-az stack group show -g <your-rg> -n cloud-nss-zidauth --query outputs.api_url -o tsv
+az stack group show -g <your-rg> -n cloud-nss-zidauth --query outputs.api_url.value -o tsv
 ```
 
 It ends in `/streams/Custom-nss_zidauth_CL?api-version=2021-11-01-preview`.
@@ -66,7 +68,7 @@ It ends in `/streams/Custom-nss_zidauth_CL?api-version=2021-11-01-preview`.
 To remove the deployment later:
 
 ```bash
-az stack group delete --name cloud-nss-zidauth --resource-group <your-rg> --delete-resources
+az stack group delete --name cloud-nss-zidauth --resource-group <your-rg> --action-on-unmanage deleteResources --yes
 ```
 
 ---
@@ -77,6 +79,7 @@ Scope is the **DCR**, not the resource group.
 
 ```bash
 SP_OBJECT_ID=$(az ad sp show --id <appId-from-step-1> --query id -o tsv)
+# -n must match the dcrName you set in Step 2's .bicepparam, not necessarily the default below
 DCR_ID=$(az resource show -g <your-rg> -n dcr-sentinel-cloud-zidauth \
   --resource-type Microsoft.Insights/dataCollectionRules --query id -o tsv)
 
@@ -106,7 +109,10 @@ ZIA admin portal → **Logs → Log Streaming → Internet Log Streaming - Nanol
 | **Scope** | `https://monitor.azure.com//.default` — the **double slash** before `.default` is deliberate, not a typo |
 | **Grant Type** | `client_credentials` |
 | **Authorization URL** | `https://login.microsoftonline.com/<tenantid>/oauth2/v2.0/token` |
+| **Max Batch Size** | `512` `KB` |
 | **API URL** | the `api_url` output from Step 2 |
+
+Do not raise Max Batch Size above `1` `MB` — that is the DCE logs-ingestion request cap. An oversized batch is rejected with HTTP 413, and the only place that shows up is the ZIA feed status page, where it is indistinguishable from "the 5-hour clock hasn't elapsed yet."
 
 ### HTTP Headers
 
@@ -123,7 +129,7 @@ Required — the DCR ingest endpoint rejects payloads without it.
 | **Log Type** | `Authentication` |
 | **Feed Output Type** | `JSON` |
 | **JSON Array Notation** | enabled |
-| **Feed Escape Character** | `"\,` |
+| **Feed Escape Character** | `"\,` — if values arrive mangled, see the escape-character ladder in Troubleshooting |
 | **Feed Output Format** | paste the contents of `cloud-nss-zidauth.fof` |
 
 Save and **enable** the feed. The up-to-5-hour clock starts now.
@@ -140,19 +146,23 @@ Azure Portal → Microsoft Sentinel → **Workbooks → Add workbook → Edit �
 
 **Before waiting on Zscaler**, prove the Azure half works on its own. Edit `../../cloud-nss-test/logtest.ps1` with your tenant/app/DCE/DCR values, set `$Table = "Custom-nss_zidauth_CL"` and `$log_file = "sample-zidauth.log"`, and run it. If this fails, the problem is in Azure, not in the Zscaler portal.
 
+**A green smoke test does not validate the timestamp format.** `logtest.ps1` overwrites `TimeGenerated` with its own ISO-8601 value before sending, so the `.fof`'s `yyyy-mth-dd,hh:mm:ss` form is never exercised. Only a real feed delivery proves that.
+
 Then:
 
 ```kusto
 // raw ingest sanity check
 CommonSecurityLog
+| where DeviceVendor == "Zscaler"
 | where DeviceProduct == "NSSAuthenticationServiceslog"
 | summarize rows=count(), latest=max(TimeGenerated)
 
 // parsed event check
 CommonSecurityLog
+| where DeviceVendor == "Zscaler"
 | where DeviceProduct == "NSSAuthenticationServiceslog"
 | project TimeGenerated, Activity, DeviceAction, DeviceCustomString1, DeviceCustomString2,
-          DeviceEventCategory, SourceUserName, SourceIP, EventOutcome, deviceExternalId
+          DeviceEventCategory, SourceUserName, SourceIP, EventOutcome, DeviceExternalID
 | top 20 by TimeGenerated desc
 ```
 
@@ -186,15 +196,39 @@ It is sourced from `resource`, which Zscaler documents as "the specific entity w
 | `az role assignment create` fails with an authorization error | You have `Contributor`. Assigning roles needs `Owner` or `User Access Administrator`. |
 | **Rows arrive but every field is empty** | The `.fof` in the Zscaler portal does not match the DCR stream declaration. Re-paste `cloud-nss-zidauth.fof` exactly; a single renamed or dropped key empties the whole record. |
 | Rows arrive but `TimeGenerated` is wrong or missing | Year token mismatch. See the note on `%d{yy}` vs `%04d{yyyy}` below. |
-| Values contain stray backslashes or quotes | Feed Escape Character. Try `"\,` first, then `"\,=`, then `,\"` — changing one value at a time. |
+| Values contain stray backslashes or quotes | Feed Escape Character — see the ladder below. |
 | `SourceUserName` is blank on many rows | Expected for non-login event types — see point 3 above. |
 | `SourceUserName` is full of random strings | The feed is using `%s{oresource}`. See point 1 above. |
 | ZIdentity and Admin Audit rows mixed together | A query missing its `DeviceProduct` filter. |
 | No rows at all, ever | Check Log Streaming role permissions in the Authentication Service, then the portal's NSS Feed status page for delivery errors. |
 
+### The escape-character ladder
+
+Zscaler's documentation gives three different values for this field and the ZPA Cloud NSS guide gives a fourth. There is no way to pick correctly from the documents, so try them in this order, **changing one value at a time** and re-checking between each:
+
+1. `"\,` — the Sentinel deployment guide's Cloud NSS section
+2. `,\` — the ZPA Cloud NSS guide; the only value in this repo attached to a feed known to have run
+3. `"\,=` — the Sentinel guide's VM/syslog CEF section
+4. `,\"` — the Adding Cloud NSS Feeds for Authentication Logs page
+
+Detect a bad setting rather than guessing — a mangled value and a value that legitimately contains a backslash look the same in a table:
+
+```kusto
+CommonSecurityLog
+| where DeviceVendor == "Zscaler" and DeviceProduct == "NSSAuthenticationServiceslog"
+| where Activity has "\\" or DeviceCustomString3 has "\\" or SourceUserName has "\\"
+| take 20
+```
+
+No rows means the current setting is fine.
+
 ### A note on the year token
 
-`cloud-nss-zidauth.fof` builds `TimeGenerated` with `%d{yy}`, matching the other ZIA feeds in this repo. Zscaler's Authentication field reference documents `%04d{yyyy}` and does not list `%d{yy}`. If timestamps come through wrong or empty, swap **only** the year token to `%04d{yyyy}` and re-save the feed. `cloud-nss-sandbox.fof` in this repo uses the `%u{yyyy}` form as a further fallback.
+`cloud-nss-zidauth.fof` builds `TimeGenerated` with `%04d{yyyy}`, which is the form Zscaler's Authentication field reference documents for this log type.
+
+The other ZIA feeds in this repo use `%d{yy}` instead, and that is **not** a discrepancy to correct — `%d{yy}` also emits a four-digit year (see `cloud-nss-test/sample-audit.log`, which shows `2024-06-12`). The two produce identical output. This feed uses the documented token because it is the one the Authentication field table actually lists; `%d{yy}` appears nowhere in it.
+
+If timestamps still come through wrong, or the portal refuses to **save** the Feed Output Format at all, change **only** the year token — `%d{yy}` and then `%u{yyyy}` (the form `cloud-nss-sandbox.fof` uses) are the fallbacks. Each attempt costs up to another 5 hours, so change one thing per cycle.
 
 ---
 
@@ -213,7 +247,7 @@ It is sourced from `resource`, which Zscaler documents as "the specific entity w
 For Cloud NSS Feeds for Authentication Logs, copy and paste the prepopulated Feed Output Format from the file `cloud-nss-zidauth.fof` in the Zscaler GitHub repo, or use the following:
 
 ```
-\{"TimeGenerated":"%d{yy}-%02d{mth}-%02d{dd},%02d{hh}:%02d{mm}:%02d{ss}","sourcetype":"zscalernss-zid-auth","vendor":"Zscaler","product":"NSSAuthenticationServiceslog","version":"5.7","Severity":"3","name":"%s{category}","deviceEventClassId":"%s{action}","act":"%s{action}","cs1Label":"category","cs1":"%s{category}","cs2Label":"subcategory","cs2":"%s{subcategory}","cs3Label":"resource","cs3":"%s{resource}","cat":"%s{interface}","suser":"%s{resource}","src":"%s{clientip}","outcome":"%s{result}","deviceExternalId":"%d{recordid}"\}
+\{"TimeGenerated":"%04d{yyyy}-%02d{mth}-%02d{dd},%02d{hh}:%02d{mm}:%02d{ss}","sourcetype":"zscalernss-zid-auth","vendor":"Zscaler","product":"NSSAuthenticationServiceslog","version":"5.7","Severity":"3","name":"%s{category}","deviceEventClassId":"%s{action}","act":"%s{action}","cs1Label":"category","cs1":"%s{category}","cs2Label":"subcategory","cs2":"%s{subcategory}","cs3Label":"resource","cs3":"%s{resource}","cat":"%s{interface}","suser":"%s{resource}","src":"%s{clientip}","outcome":"%s{result}","deviceExternalId":"%d{recordid}"\}
 ```
 
 Set **Log Type** to `Authentication`. All other SIEM connectivity and formatting fields follow the standard Cloud NSS settings documented for the other ZIA feeds.

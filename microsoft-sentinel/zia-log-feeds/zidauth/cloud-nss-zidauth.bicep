@@ -20,7 +20,7 @@ Steps needed to deploy:
 
 5. If you ever need to delete the deployment, you can run the following command from Azure CLI:
 
-    az stack group delete --name cloud-nss-zidauth --resource-group <resource group containing your log analytics workspace> --delete-resources
+    az stack group delete --name cloud-nss-zidauth --resource-group <resource group containing your log analytics workspace> --action-on-unmanage deleteResources --yes
 
 */
 // These resources need to be pre-configured
@@ -163,7 +163,7 @@ resource dcr 'Microsoft.Insights/dataCollectionRules@2022-06-01' = {
         ]
         // sourcetype is declared in the stream above but deliberately not projected here,
         // matching cloud-nss-audit.bicep. CommonSecurityLog has no column for it.
-        transformKql: 'source | project TimeGenerated, DeviceVendor=tostring(vendor), DeviceProduct=tostring(product), DeviceVersion=tostring(version), LogSeverity=tostring(Severity), Activity=tostring(name), DeviceEventClassID=tostring(deviceEventClassId), DeviceAction=tostring(act), DeviceCustomString1Label=tostring(cs1Label), DeviceCustomString1=tostring(cs1), DeviceCustomString2Label=tostring(cs2Label), DeviceCustomString2=tostring(cs2), DeviceCustomString3Label=tostring(cs3Label), DeviceCustomString3=tostring(cs3), DeviceEventCategory=tostring(cat), SourceUserName=tostring(suser), SourceIP=tostring(src), EventOutcome=tostring(outcome), deviceExternalId=tostring(deviceExternalId)'
+        transformKql: 'source | project TimeGenerated, DeviceVendor=tostring(vendor), DeviceProduct=tostring(product), DeviceVersion=tostring(version), LogSeverity=tostring(Severity), Activity=tostring(name), DeviceEventClassID=tostring(deviceEventClassId), DeviceAction=tostring(act), DeviceCustomString1Label=tostring(cs1Label), DeviceCustomString1=tostring(cs1), DeviceCustomString2Label=tostring(cs2Label), DeviceCustomString2=tostring(cs2), DeviceCustomString3Label=tostring(cs3Label), DeviceCustomString3=tostring(cs3), DeviceEventCategory=tostring(cat), SourceUserName=tostring(suser), SourceIP=tostring(src), EventOutcome=tostring(outcome), DeviceExternalID=tostring(deviceExternalId)'
 
         outputStream: 'Microsoft-CommonSecurityLog'
       }
